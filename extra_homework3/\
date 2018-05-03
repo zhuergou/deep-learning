@@ -1,0 +1,156 @@
+import matplotlib.pyplot as plt
+import os
+import numpy as np
+import tensorflow as tf
+import pickle
+
+def shufflelists(lists):
+	rv = np.random.permutation(len(lists[1]))
+	output = []
+	for l in lists:
+		output.append(l[rv])
+	return output
+
+dir_path = os.path.dirname(os.path.realpath(__file__))
+filename = dir_path + "/new.pkl"
+data_file = file(filename,"rb")
+train_x, train_y, test_x, test_y = pickle.load(data_file)
+data_file.close()
+
+train_x_new = np.reshape(train_x, [4000, 28, 28])
+trest_x_new = np.reshape(test_x, [1000, 28, 28]) 
+
+x = tf.placeholder("float", [None, 28, 28])
+y = tf.placeholder("float", [None])
+
+W1 = tf.Variable(tf.truncated_normal(shape = [5,5], stddev = 0.02))
+W1_0 = tf.Variable(tf.truncated_normal([24,24], stddev = 0.02))
+
+W2 = tf.Variable(tf.truncated_normal(shape = [64, 1], stddev = 0.02))
+W2_0 = tf.Variable(tf.truncated_normal(shape = [1, 1], stddev = 0.02))
+
+def get_conv(x, W1, W1_0):
+	conv_rst = []
+	for i in range(24):
+		for j in range(24):
+			conv_rst.append(tf.reduce_sum(tf.slice(x, [0, i, j], [-1, 5, 5])*W1, [1, 2]))
+	conv_rst1 = tf.reshape(tf.stack(conv_rst), [-1, 24, 24])
+	
+	return conv_rst1
+
+conv_layer = get_conv(x, W1, W1_0)
+activate_layer = tf.nn.relu(conv_layer)
+
+def get_pool(activate_layer):
+	pool_rst = []
+	for i in range(8):
+		for j in range(8):
+			pool_rst.append(tf.reduce_max(tf.slice(activate_layer, [0, 3*i, 3*j], [-1, 3, 3]), [1, 2]))
+	pool_rst1 = tf.reshape(tf.stack(pool_rst), [-1, 8, 8])
+	return pool_rst1
+
+pool_rst = get_pool(activate_layer)
+print pool_rst.get_shape().as_list()
+
+pool_rst_flat = tf.reshape(pool_rst, [-1, 64])
+
+pred = tf.sigmoid(tf.matmul(pool_rst_flat, W2) + W2_0)
+
+## Cost function
+cost = tf.reduce_mean(0.5* tf.reduce_sum((y - pred)**2, reduction_indices = 1))
+
+W2_grad = pred**2 * pool_rst_flat *(pred - y)
+W2_0_grad = pred **2 *(pred - y)
+
+## here may have issue
+pool_grad = pred**2 * tf.reshape(tf.tile(W2, tf.shape(pred)[0]), [tf.shape(pred)[0], 64]) *(pred - y)
+
+def get_pool_grad(pool_grad):
+	pool_before_flat_grad = tf.Variable(tf.zeros([50, 8, 8]))
+	for i in range(8):
+		for j in range(8):
+			for k in range(50):
+				pool_before_flat_grad[k, i, j] = pool_grad[k, (8*i+ j)]
+	return pool_before_flat_grad
+
+pool_before_flat_grad = get_pool_grad(pool_grad)
+
+def get_A_grad(pool_before_flat_grad):
+	A_grad = tf.Variable(tf.zeros([50, 24, 24]))
+	for k in range(50):
+		for i in range(8):
+			for j in range(8):
+				max_value = -1000
+				index_a = -1
+				index_b = -1
+				for m in range(2):
+					for n in range(2):
+						if activate_layer[k, 3*i+m, 3*j+n] > max_value:
+							max_value = activate_layer[k, 3*i+m, 3*j + n]
+							index_a = 3*i + m
+							index_b = 3*j + n
+				A_grad[k, index_a, index_b] = pool_before_flat_grad[k, i, j]
+	return A_grad
+
+A_grad = get_A_grad(pool_before_flat_grad)
+				
+def get_C_grad(A_grad):
+	C_grad = tf.Variable(tf.zeros([50, 24, 24]))
+	for i in range(24):
+		for j in range(24):
+			for k in range(50):
+				if conv_layer[k, i, j] > 0:
+					C_grad[k, i, j] = A_grad[k, i, j]
+	return C_grad
+
+C_grad = get_C_grad(A_grad)
+
+def get_W_grad(C_grad):
+	W_grad = tf.Variable(tf.zeros([50, 5, 5]))
+	for i in range(5):
+		for j in range(5):
+			for k in range(50):
+				tmp = 0
+				for m in range(24):
+					for n in range(24):
+						tmp = tmp + x[k, i+m, j+n] *C_grad[m][n]
+				W_grad[k, i, j] += tmp
+	return W_grad
+
+W1_grad = get_W_grad(C_grad)
+
+W1_0_grad = C_grad
+
+update_step = [tf.assign(W1, W1 - learning_rate* tf.reduce_mean(W1_grad, 0)), tf.assign(W1_0, W1_0 - learning_rate* tf.reduce_mean(W1_0_grad, 0)), tf.assign(W2, W2 - learning_rate* tf.reduce_mean(W2_grad, 0)), tf.assign(W2_0, W2_0 - learning_rate* tf.reduce_mean(W2_0_grad, 0))]
+
+model = tf.global_variables_initializer()
+
+correct_prediction = tf.greater((pred - 0.5)*(y-0.5), 0)
+accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
+
+with tf.Session() as session:
+	session.run(model)
+	for epoch in range(2):
+		b_idx = 0
+		b_size = 50
+		count = 1
+		train_x_new, train_y = shufflelists([train_x_new, train_y])
+		while (b_idx + b_size) <= train_x_new.shape[0]:
+			session.run(update_step, feed_dict = {x: train_x_new[b_idx: b_idx + b_size], y: train_y[b_idx: b_idx + b_size]})
+			b_idx += b_size
+			count = count + 1
+			rst1 = accuracy.eval({x: train_x_new, y: train_y})
+			print rst1
+			rst2 = accuracy.eval({x: test_x_new, y: test_y})
+			print rst2
+			print "#####"
+			if count % 50:
+				thetha = []
+				thetha.append(W1.eval())
+				thetha.append(W1_0.eval())
+				thetha.append(W2.eval())
+				thetha.append(W2_0.eval())
+				filehandler = open("extra_parameter.txt", "wb")
+				pickle.dump(thetha, filehandler)
+				filehandler.close()
+				print "###########update#########"
